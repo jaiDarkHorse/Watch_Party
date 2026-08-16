@@ -1,0 +1,829 @@
+Yep. If the goal is SyncWatch for many people, build around the SFU from day one. That avoids rewriting the media architecture later.
+
+For you + your friend, I'd structure the project as a production-style MVP first, then scale it.
+
+🚀 SyncWatch — SFU Development Roadmap
+0. Final architecture
+                         SYNCWATCH
+                            │
+                    ┌───────┴────────┐
+                    │                │
+              CONTROL PLANE      MEDIA PLANE
+                    │                │
+              Spring Boot       mediasoup SFU
+                    │                │
+              WebSocket/REST         │
+                    │                │
+                    └───────┬────────┘
+                            │
+                         Internet
+                            │
+                 ┌──────────┼──────────┐
+                 │          │          │
+              Host       Viewer A   Viewer B
+                 │          │          │
+                 └──────── WebRTC ─────┘
+Recommended stack
+Layer	Technology
+Frontend	React + TypeScript
+UI	Tailwind CSS
+Main backend	Spring Boot + Java
+REST API	Spring Web
+Database	PostgreSQL
+Authentication	Spring Security + JWT
+Real-time control	WebSocket
+SFU	mediasoup
+SFU language	Node.js/TypeScript
+WebRTC	Browser WebRTC API
+NAT traversal	STUN + TURN
+TURN	coturn
+Reverse proxy	Nginx
+Deployment	Oracle Cloud
+Containers	Docker
+CI/CD	GitHub Actions
+Monitoring	Prometheus + Grafana later
+
+The important architectural decision:
+
+Spring Boot manages the application. mediasoup manages the video.
+
+Don't try to implement the SFU yourself. That's months of unnecessary pain.
+
+PHASE 1 — Project foundation
+Goal
+
+Get both of you working on the same repository without stepping on each other's code.
+
+SyncWatch/
+│
+├── frontend/
+│
+├── backend/
+│   └── Spring Boot
+│
+├── media-server/
+│   └── mediasoup
+│
+├── shared/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── nginx/
+│   └── coturn/
+│
+└── docs/
+Git strategy
+main
+│
+├── develop
+│
+├── feature/frontend-room
+├── feature/backend-room
+├── feature/webrtc-sfu
+└── feature/auth
+
+Don't both directly work on main.
+
+PHASE 2 — Frontend foundation
+
+You already have a lot of this from your current SyncWatch frontend.
+
+Build:
+
+Home
+  ↓
+Create Room
+  ↓
+Room
+  ↓
+Join Room
+
+Core pages:
+
+/
+├── Home
+├── Login
+├── Register
+├── Library
+├── Create Room
+├── Join Room
+├── Watch Room
+└── Settings
+
+Create reusable components:
+
+Button
+Modal
+Input
+Avatar
+VideoPlayer
+ParticipantList
+ChatPanel
+RoomControls
+LoadingScreen
+ErrorBoundary
+
+Don't connect WebRTC yet.
+
+PHASE 3 — Spring Boot backend
+
+Now create the application backend.
+
+Database
+
+Start with:
+
+User
+Room
+RoomMember
+WatchSession
+
+Eventually:
+
+Movie
+WatchHistory
+Invitation
+
+Example:
+
+USER
+ ├── id
+ ├── username
+ ├── email
+ └── passwordHash
+
+
+ROOM
+ ├── id
+ ├── roomCode
+ ├── hostId
+ ├── createdAt
+ └── status
+
+
+ROOM_MEMBER
+ ├── id
+ ├── roomId
+ ├── userId
+ └── role
+PHASE 4 — Room system
+
+Build this before touching SFU.
+
+Create room
+POST /api/rooms
+
+Response:
+
+{
+  "roomId": "abc123",
+  "roomCode": "K7X92P"
+}
+Join room
+POST /api/rooms/join
+Get room
+GET /api/rooms/{roomId}
+
+You'll now have:
+
+User
+   ↓
+Create Room
+   ↓
+Room Code
+   ↓
+Other users join
+PHASE 5 — WebSocket synchronization
+
+Now build the control plane.
+
+Use WebSocket/STOMP or a raw WebSocket implementation.
+
+I'd keep the protocol extremely simple.
+
+Events
+ROOM_JOIN
+ROOM_LEAVE
+
+
+PLAY
+PAUSE
+SEEK
+
+
+SYNC_REQUEST
+SYNC_RESPONSE
+
+
+HOST_CHANGED
+
+
+USER_JOINED
+USER_LEFT
+
+Example:
+
+{
+  "type": "PLAY",
+  "position": 125.42,
+  "timestamp": 1786884123456
+}
+
+The server broadcasts this to everyone in the room.
+
+PHASE 6 — Build the mediasoup server
+
+🔥 This is the big one.
+
+Create:
+
+media-server/
+│
+├── src/
+│   ├── server.ts
+│   ├── worker.ts
+│   ├── router.ts
+│   ├── room.ts
+│   ├── producer.ts
+│   ├── consumer.ts
+│   └── transport.ts
+│
+└── package.json
+
+Conceptually:
+
+mediasoup Worker
+       │
+       ▼
+    Router
+       │
+ ┌─────┴─────┐
+ │           │
+Producer   Consumers
+ │           │
+Host       Viewers
+PHASE 7 — Host WebRTC pipeline
+
+Now connect the browser to mediasoup.
+
+The host:
+
+File
+ ↓
+URL.createObjectURL()
+ ↓
+<video>
+ ↓
+captureStream()
+ ↓
+MediaStreamTrack
+ ↓
+mediasoup Producer
+ ↓
+SFU
+
+The critical object is the Producer.
+
+Host
+ │
+ │ MediaStreamTrack
+ ▼
+SendTransport
+ │
+ ▼
+Producer
+ │
+ ▼
+mediasoup Router
+PHASE 8 — Viewer pipeline
+
+Viewer:
+
+SFU
+ ↓
+Consumer
+ ↓
+RecvTransport
+ ↓
+MediaStream
+ ↓
+<video>
+
+So the complete pipeline becomes:
+
+HOST
+Local file
+   ↓
+<video>
+   ↓
+captureStream()
+   ↓
+MediaStreamTrack
+   ↓
+WebRTC Producer
+   ↓
+┌─────────────────┐
+│     MEDIASOUP   │
+│      ROUTER     │
+└────────┬────────┘
+         │
+     ┌───┼────┐
+     ↓   ↓    ↓
+   C1    C2   C3
+     ↓   ↓    ↓
+ Viewer A B    C
+
+🔥 That's your core product.
+
+PHASE 9 — Signaling ↔ mediasoup integration
+
+This is where the architecture becomes interesting.
+
+Your browser needs information from the SFU:
+
+router RTP capabilities
+transport parameters
+producer ID
+consumer parameters
+
+Typical flow:
+
+Viewer
+  │
+  │ "I joined room"
+  ▼
+Spring Boot
+  │
+  │ room information
+  ▼
+Media Server
+  │
+  ▼
+mediasoup Router
+
+You need a clean communication layer between Spring Boot and the media server.
+
+For the first version, I'd use:
+
+Spring Boot
+      │
+      │ WebSocket / internal API
+      ▼
+mediasoup server
+
+Later you can make this more sophisticated.
+
+PHASE 10 — Room lifecycle
+
+Now combine everything.
+
+Host creates room
+POST /rooms
+       ↓
+Spring Boot
+       ↓
+Room created
+       ↓
+Media room created
+       ↓
+Host joins
+Viewer joins
+Viewer
+ ↓
+Join Room
+ ↓
+Spring Boot
+ ↓
+WebSocket
+ ↓
+mediasoup
+ ↓
+Create Consumer
+ ↓
+Viewer receives stream
+PHASE 11 — Playback synchronization
+
+Now connect your <video> controls to WebSocket.
+
+Host presses Play
+Host video.play()
+       │
+       ▼
+WebSocket
+       │
+       ▼
+Spring Boot
+       │
+       ▼
+Broadcast
+       │
+ ┌─────┼─────┐
+ ▼     ▼     ▼
+ A     B     C
+
+Viewer:
+
+video.currentTime = position;
+video.play();
+Pause
+
+Same concept.
+
+Seek
+
+Send:
+
+{
+  "type": "SEEK",
+  "position": 356.72
+}
+PHASE 12 — Drift correction
+
+This is where your app starts feeling actually good.
+
+Suppose:
+
+Host     125.420 sec
+Viewer A 125.380 sec
+Viewer B 124.910 sec
+Viewer C 126.020 sec
+
+Every few seconds:
+
+Host → SYNC
+
+Server broadcasts:
+
+{
+  "position": 125.42,
+  "serverTimestamp": 1786884123456
+}
+
+Viewer calculates expected position.
+
+Then:
+
+difference < 100ms
+    ↓
+do nothing
+
+
+difference > threshold
+    ↓
+correct playback
+
+Don't constantly set currentTime; that will make playback ugly.
+
+PHASE 13 — Host controls
+
+Only host gets:
+
+Play
+Pause
+Seek
+Load video
+Change video
+End room
+
+Viewers:
+
+Play ❌
+Pause ❌
+Seek ❌
+
+
+Chat ✅
+Leave ✅
+Volume ✅
+Fullscreen ✅
+
+Server must enforce this too.
+
+Never trust the frontend.
+
+PHASE 14 — Chat
+
+Now add:
+
+Room
+ ├── Video
+ ├── Participants
+ └── Chat
+
+WebSocket event:
+
+{
+  "type": "CHAT",
+  "user": "Kishore",
+  "message": "Bro 😂"
+}
+PHASE 15 — STUN/TURN
+
+Now test outside your local network.
+
+Use:
+
+STUN
+
+first.
+
+Then configure:
+
+coturn
+
+for TURN.
+
+Architecture:
+
+Browser
+   │
+   ├──── Direct WebRTC ────► SFU
+   │
+   └──── TURN ─────────────► SFU
+
+TURN is especially important when users are behind restrictive NAT/firewalls.
+
+PHASE 16 — Security
+
+Before putting this publicly online:
+
+Authentication
+JWT
+Room security
+
+Use:
+
+random room code
++
+room membership
++
+host permissions
+WebSocket security
+
+Validate:
+
+JWT
+roomId
+userId
+role
+Media server security
+
+Never expose your mediasoup internal APIs publicly.
+
+PHASE 17 — Docker
+
+Containerize:
+
+frontend
+backend
+media-server
+postgres
+coturn
+nginx
+
+Development:
+
+docker compose up
+
+Architecture:
+
+                    NGINX
+                      │
+          ┌───────────┼────────────┐
+          ↓           ↓            ↓
+       Frontend    Spring Boot   WebSocket
+                                    │
+                                    ▼
+                               mediasoup
+                                    │
+                                    ▼
+                                  WebRTC
+PHASE 18 — Oracle Cloud deployment
+
+Your Oracle VM becomes:
+
+Internet
+    │
+    ▼
+Oracle Cloud
+    │
+    ├── Nginx :443
+    │
+    ├── Spring Boot
+    │
+    ├── mediasoup
+    │
+    ├── coturn
+    │
+    └── PostgreSQL
+
+But there's one very important Oracle configuration:
+
+WebRTC/media servers use UDP, not just HTTP/HTTPS.
+
+So your Oracle Cloud networking/security rules need to allow the required mediasoup RTP/RTCP UDP port range and TURN ports.
+
+Don't deploy the SFU and only open port 443 expecting WebRTC to magically work.
+
+PHASE 19 — Monitoring
+
+Once everything works:
+
+Prometheus
+     ↓
+Grafana
+
+Monitor:
+
+CPU
+RAM
+Network bandwidth
+Packet loss
+WebRTC connections
+Active rooms
+Active producers
+Active consumers
+SFU workers
+
+This becomes extremely useful when you start testing 10, 20, 50+ users.
+
+PHASE 20 — Load testing
+
+Don't immediately test with 100 real people.
+
+Test progressively:
+
+2 users
+ ↓
+5
+ ↓
+10
+ ↓
+25
+ ↓
+50
+ ↓
+100
+
+Measure:
+
+CPU
+RAM
+Network
+Latency
+Packet loss
+Video quality
+Join time
+
+Your biggest bottleneck may eventually be network bandwidth, not CPU.
+
+👥 How you and your friend should divide the work
+
+This is actually perfect for two people.
+
+You — Backend / Infrastructure
+
+Focus on:
+
+Spring Boot
+├── Authentication
+├── Users
+├── Rooms
+├── PostgreSQL
+├── WebSocket
+├── Permissions
+└── REST APIs
+
+
+Infrastructure
+├── Docker
+├── Oracle Cloud
+├── Nginx
+├── coturn
+└── CI/CD
+Friend — Frontend / WebRTC
+React
+├── UI
+├── Room
+├── Video player
+├── Participants
+├── Chat
+└── Settings
+
+
+WebRTC
+├── mediasoup-client
+├── Device
+├── SendTransport
+├── RecvTransport
+├── Producer
+└── Consumer
+But collaborate on this part
+
+Both of you should understand:
+
+WebRTC
+   ↓
+mediasoup
+   ↓
+SFU
+   ↓
+Producer / Consumer
+
+Because that's the heart of the project.
+
+🧪 Milestones
+
+I'd use these exact milestones:
+
+M1 — Frontend
+Home
+Login
+Room UI
+Video player
+Mock participants
+M2 — Backend
+Spring Boot
+PostgreSQL
+Users
+Authentication
+Rooms
+M3 — WebSocket
+Join
+Leave
+Play
+Pause
+Seek
+Chat
+M4 — SFU
+mediasoup
+Router
+WebRTC transports
+Producer
+Consumer
+M5 — Real Watch Party
+Host selects video
+       ↓
+captureStream()
+       ↓
+SFU
+       ↓
+Multiple viewers
+M6 — Synchronization
+Play
+Pause
+Seek
+Drift correction
+Host controls
+M7 — Networking
+STUN
+TURN
+coturn
+NAT testing
+M8 — Security
+JWT
+Room permissions
+Host permissions
+WebSocket authentication
+M9 — Deployment
+Docker
+Oracle Cloud
+Nginx
+HTTPS
+TURN
+M10 — Scale testing
+2 → 5 → 10 → 25 → 50 → 100
+🧠 One thing I'd change from your original architecture
+
+Don't make the architecture:
+
+Oracle
+├── Signaling
+└── SFU
+
+as if those are two completely independent systems.
+
+Make the overall design:
+
+                         SYNCWATCH
+                            │
+             ┌──────────────┴──────────────┐
+             │                             │
+       APPLICATION SERVER              MEDIA SERVER
+       Spring Boot                     Node.js
+             │                             │
+       ┌─────┼──────┐                mediasoup
+       │     │      │                     │
+      Auth  Room   Sync               Router
+       │     │      │                /    |    \
+       └─────┴──────┘               P1    P2    P3
+             │                        │     │     │
+             └──────── WebSocket ─────┘     │     │
+                                            │     │
+                                      WebRTC viewers
+
+That's a much cleaner architecture for a serious portfolio project.
+
+And since you're already building the SyncWatch frontend, don't throw that work away. Your current Milestone 1 frontend can become the presentation layer; now you build the Spring Boot + WebSocket + mediasoup infrastructure underneath it.
+
+The next major step should be M1 → M2 → M3, then we attack the SFU. Don't start by trying to make the entire WebRTC system at once. That's how debugging turns into a 3 AM boss battle. 😄
