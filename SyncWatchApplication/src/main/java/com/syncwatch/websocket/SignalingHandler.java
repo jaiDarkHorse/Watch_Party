@@ -1,56 +1,129 @@
 package com.syncwatch.websocket;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 import org.springframework.stereotype.Component;
+import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
-import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 
 @Component
-public class SignalingHandler extends TextWebSocketHandler 
-{
+public class SignalingHandler extends AbstractWebSocketHandler {
 
-    private final List<WebSocketSession> clients = new ArrayList<>();
+    private WebSocketSession hostSession;
+
+    private final Set<WebSocketSession> viewers = new CopyOnWriteArraySet<>();
+
 
     @Override
-    public void afterConnectionEstablished(WebSocketSession session) throws Exception 
-    {
-    	
-        if (clients.size() >= 2) 
-        {
-            session.close();
-            System.out.println("Connection rejected: Watch Party is full");
+    public void afterConnectionEstablished(WebSocketSession session) {
+        System.out.println("WebSocket connected: " + session.getId());
+    }
+
+
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        String payload = message.getPayload();
+
+        System.out.println("Received TEXT from " + session.getId() + ": " + payload);
+
+
+        if (payload.equals("HOST")) {
+            hostSession = session;
+
+            System.out.println("Client registered as HOST");
+
+            session.sendMessage(new TextMessage("HOST_REGISTERED"));
+
             return;
         }
 
-        clients.add(session);
-        System.out.println("Client connected: " + session.getId());
-    }
 
-    @Override
-    protected void handleTextMessage(WebSocketSession session,TextMessage message)throws Exception 
-    {
+        if (payload.equals("VIEWER")) {
+            viewers.add(session);
 
-        String payload = message.getPayload();
+            System.out.println("Client registered as VIEWER");
 
-        System.out.println("Received: " + payload);
+            session.sendMessage(new TextMessage("VIEWER_REGISTERED"));
 
-        // Broadcast message to other clients
-        for (WebSocketSession client : clients) 
-        {
-            if (client.isOpen() && !client.getId().equals(session.getId())) 
-            {
-                client.sendMessage(new TextMessage(payload));
+            if (hostSession != null && hostSession.isOpen()) {
+                hostSession.sendMessage(new TextMessage("VIEWER_READY"));
+
+                System.out.println("Notified HOST: VIEWER_READY");
+            }
+
+            return;
+        }
+
+
+        if (payload.startsWith("VIDEO_READY:") || payload.startsWith("AUDIO_READY:")) {
+            System.out.println("Viewer finished processing: " + payload);
+
+            if (hostSession != null && hostSession.isOpen()) {
+                hostSession.sendMessage(new TextMessage(payload));
+
+                System.out.println("Sent to HOST: " + payload);
+            }
+
+            return;
+        }
+
+
+        if (session.equals(hostSession)) {
+            for (WebSocketSession viewer : viewers) {
+                if (viewer.isOpen()) {
+                    viewer.sendMessage(new TextMessage(payload));
+                }
             }
         }
     }
 
+
     @Override
-    public void afterConnectionClosed(WebSocketSession session, org.springframework.web.socket.CloseStatus status) 
-    {
-        clients.remove(session);
-        System.out.println("Client disconnected: "+ session.getId());
+    protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) throws Exception {
+        int size = message.getPayloadLength();
+
+        System.out.println("Received BINARY from " + session.getId() + ": " + size + " bytes");
+
+
+        if (!session.equals(hostSession)) {
+            System.out.println("Binary message rejected: sender is not HOST");
+
+            return;
+        }
+
+
+        byte[] data = new byte[message.getPayloadLength()];
+
+        message.getPayload().get(data);
+
+        System.out.println("Copied binary data: " + data.length + " bytes");
+
+
+        for (WebSocketSession viewer : viewers) {
+            if (viewer.isOpen()) {
+                System.out.println("Sending binary to viewer: " + viewer.getId());
+
+                viewer.sendMessage(new BinaryMessage(data));
+
+                System.out.println("Binary sent to viewer: " + data.length + " bytes");
+            }
+        }
+    }
+
+
+    @Override
+    public void afterConnectionClosed(WebSocketSession session, org.springframework.web.socket.CloseStatus status) {
+        System.out.println("WebSocket disconnected: " + session.getId());
+
+        if (session.equals(hostSession)) {
+            hostSession = null;
+
+            System.out.println("HOST disconnected");
+        }
+
+        viewers.remove(session);
     }
 }

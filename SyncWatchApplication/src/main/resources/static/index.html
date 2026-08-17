@@ -1,23 +1,57 @@
 <!DOCTYPE html>
 <html>
+
 <head>
+
     <meta charset="UTF-8">
-    <title>SyncWatch - Phase 1</title>
+
+    <title>SyncWatch</title>
+
 </head>
+
 
 <body>
 
-    <h1>SyncWatch Phase 1</h1>
+    <h1>SyncWatch</h1>
+
 
     <video
         id="video"
         controls
-        width="800">
-    </video>
+        width="800"
+    ></video>
 
-    <p id="status">Loading...</p>
 
-    <script src="app.js"></script>
+    <br><br>
+
+
+    <button id="enablePlayback">
+        Enable Playback
+    </button>
+
+
+    <button id="playButton">
+        Play
+    </button>
+
+
+    <button id="pauseButton">
+        Pause
+    </button>
+
+
+    <button id="inspectTimeline">
+        Inspect Timeline
+    </button>
+
+
+    <p id="status">
+        Loading...
+    </p>
+
+
+    <script src="/ws-mse-test.js"></script>
 
 </body>
+
 </html>
