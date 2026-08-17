@@ -1,0 +1,1688 @@
+Yes. With your modification, the architecture becomes server-relayed streaming rather than peer-to-peer.
+
+The important point is:
+
+Oracle server becomes the middleman for both signaling and video chunks. The MP4 is never stored permanently on the server; chunks are streamed through it from Host → Server → Viewer.
+
+Full architecture
+                         ┌──────────────────────────────┐
+                         │        ORACLE SERVER         │
+                         │                              │
+                         │       Spring Boot            │
+                         │                              │
+                         │   ┌──────────────────────┐   │
+                         │   │  Signaling Handler   │   │
+                         │   │                      │   │
+                         │   │ HOST / VIEWER        │   │
+                         │   │ Room / Connection    │   │
+                         │   │ PLAY / PAUSE / SEEK  │   │
+                         │   └──────────────────────┘   │
+                         │                              │
+                         │   ┌──────────────────────┐   │
+                         │   │   Video Relay        │   │
+                         │   │                      │   │
+                         │   │  Receive Chunks      │   │
+                         │   │       ↓              │   │
+                         │   │  Forward Chunks      │   │
+                         │   │       ↓              │   │
+                         │   │     Viewer           │   │
+                         │   └──────────────────────┘   │
+                         │                              │
+                         └──────────────┬───────────────┘
+                                        │
+                       Internet         │
+             ┌──────────────────────────┴────────────────────────┐
+             │                                                   │
+             │                                                   │
+             ▼                                                   ▼
+┌────────────────────────────┐                 ┌────────────────────────────┐
+│          HOST              │                 │          VIEWER             │
+│                            │                 │                            │
+│      Local MP4             │                 │                            │
+│          │                 │                 │       Receive chunks       │
+│          ▼                 │                 │             │              │
+│       File API             │                 │             ▼              │
+│          │                 │                 │        Chunk Buffer        │
+│          ▼                 │                 │             │              │
+│     Split into chunks      │                 │             ▼              │
+│                            │                 │      Media Source (MSE)    │
+│  Chunk 1 ────────────────► │                 │             │              │
+│  Chunk 2 ────────────────► │                 │             ▼              │
+│  Chunk 3 ────────────────► │                 │          <video>           │
+│  Chunk 4 ────────────────► │                 │             │              │
+│        ...                 │                 │             ▼              │
+│                            │                 │         Playback           │
+└────────────────────────────┘                 └────────────────────────────┘
+The actual data flow
+                 VIDEO DATA
+HOST                  SERVER                  VIEWER
+
+
+MP4
+ │
+ │ File API
+ ▼
+Chunk 1 ────────────► Spring Boot ───────────► Chunk 1
+Chunk 2 ────────────► Spring Boot ───────────► Chunk 2
+Chunk 3 ────────────► Spring Boot ───────────► Chunk 3
+Chunk 4 ────────────► Spring Boot ───────────► Chunk 4
+   │                       │                       │
+   │                       │                       ▼
+   │                       │                  Buffer
+   │                       │                       │
+   │                       │                       ▼
+   │                       │                    MSE
+   │                       │                       │
+   │                       │                       ▼
+   │                       │                    <video>
+
+So unlike your current architecture:
+
+HOST ═══════════════════════════════► VIEWER
+              WebRTC
+
+you now have:
+
+HOST ─────────► ORACLE SERVER ─────────► VIEWER
+                relay
+1. Host side
+
+The Host selects:
+
+movie.mp4
+
+The browser gets a File object:
+
+const file = videoFile.files[0];
+
+You don't use captureStream() for this architecture.
+
+Instead:
+
+File
+ │
+ ▼
+file.slice()
+ │
+ ├── Chunk 1
+ ├── Chunk 2
+ ├── Chunk 3
+ ├── Chunk 4
+ └── ...
+
+For example:
+
+1 GB movie
+
+
+Chunk size = 1 MB
+
+
+1 GB
+ ↓
+~1000 chunks
+2. Host → Oracle Server
+
+The Host sends chunks to the Oracle server.
+
+You could use a WebSocket:
+
+Host Browser
+     │
+     │ WebSocket
+     │ Binary chunk
+     ▼
+Oracle Spring Boot
+
+For example:
+
+CHUNK #1
+CHUNK #2
+CHUNK #3
+CHUNK #4
+
+The server receives each chunk.
+
+3. Oracle Server → Viewer
+
+The Oracle server immediately forwards the chunk:
+
+HOST
+ │
+ │ Chunk 1
+ ▼
+ORACLE
+ │
+ │ Chunk 1
+ ▼
+VIEWER
+
+The server doesn't need to save the whole movie.
+
+Ideally:
+
+receive chunk
+     ↓
+forward chunk
+     ↓
+discard chunk
+
+So:
+
+Oracle storage:
+
+
+Movie = 0 GB
+
+assuming you don't implement recording/persistence.
+
+The server is acting as a relay.
+
+4. Viewer buffering
+
+The Viewer receives:
+
+Chunk 1
+Chunk 2
+Chunk 3
+Chunk 4
+...
+
+Instead of immediately playing everything, it maintains a buffer:
+
+Current playback:
+
+
+        ↓
+00:00 ────────▶
+
+
+Downloaded:
+
+
+████████████████░░░░░░░
+        ↑
+     playing
+
+
+              ↑
+          buffer
+
+For example:
+
+Current position = 02:00
+
+
+Buffered = 02:00 → 02:30
+
+So if the network temporarily slows:
+
+Network drops
+      ↓
+Viewer still has 30 sec buffered
+      ↓
+Video continues
+
+That's the YouTube-like behavior you're looking for.
+
+5. Media Source Extensions
+
+This is the browser component that makes the buffered architecture possible.
+
+The Viewer has:
+
+WebSocket
+   ↓
+Binary chunks
+   ↓
+Buffer
+   ↓
+MediaSource
+   ↓
+SourceBuffer
+   ↓
+<video>
+
+Conceptually:
+
+                VIEWER
+
+
+        WebSocket receives
+               │
+               ▼
+        ┌──────────────┐
+        │ Chunk Buffer │
+        └──────┬───────┘
+               │
+               ▼
+        ┌──────────────┐
+        │ MediaSource  │
+        └──────┬───────┘
+               │
+               ▼
+        ┌──────────────┐
+        │ SourceBuffer │
+        └──────┬───────┘
+               │
+               ▼
+            <video>
+
+This is the part that lets the browser progressively append media data rather than waiting for the complete file.
+
+6. Playback control
+
+Your WebSocket also carries control messages.
+
+For example:
+
+HOST
+ │
+ ├── PLAY ───────────────► SERVER ─────────► VIEWER
+ │
+ ├── PAUSE ──────────────► SERVER ─────────► VIEWER
+ │
+ ├── SEEK 120 ───────────► SERVER ─────────► VIEWER
+ │
+ └── STOP ───────────────► SERVER ─────────► VIEWER
+
+The server doesn't need to understand the video.
+
+It simply relays:
+
+{
+    "type": "PLAY"
+}
+
+or:
+
+{
+    "type": "SEEK",
+    "position": 120
+}
+7. Signaling is now separate from video
+
+This is an important architectural distinction.
+
+Your original WebRTC system needed:
+
+OFFER
+ANSWER
+ICE
+
+because WebRTC peers had to establish a connection.
+
+With the server acting as the video relay, you don't necessarily need WebRTC at all for the video transfer.
+
+You could have:
+
+                ORACLE SERVER
+
+
+             Spring Boot
+                  │
+       ┌──────────┴──────────┐
+       │                     │
+   WebSocket              WebSocket
+       │                     │
+       ▼                     ▼
+     HOST                  VIEWER
+
+And both WebSocket connections are directly with your server.
+
+So:
+
+HOST
+ │
+ │ WebSocket
+ ▼
+SERVER
+ │
+ │ WebSocket
+ ▼
+VIEWER
+
+The server becomes the central communication point.
+
+Complete v0.2 architecture
+                              INTERNET
+                                  │
+                    ┌─────────────┴─────────────┐
+                    │                           │
+                    ▼                           ▼
+             ┌─────────────┐              ┌─────────────┐
+             │    HOST     │              │   VIEWER    │
+             │   Browser   │              │   Browser   │
+             └──────┬──────┘              └──────▲──────┘
+                    │                            │
+                    │                            │
+              Local MP4                         │
+                    │                            │
+                    ▼                            │
+                File API                         │
+                    │                            │
+                    ▼                            │
+             Split into chunks                   │
+                    │                            │
+                    │ Binary WebSocket           │
+                    ▼                            │
+        ╔══════════════════════════════════════════════╗
+        ║                 ORACLE SERVER                ║
+        ║                                               ║
+        ║              Spring Boot                     ║
+        ║                                               ║
+        ║   ┌─────────────────────────────────────┐     ║
+        ║   │         WebSocket Layer             │     ║
+        ║   │                                     │     ║
+        ║   │  Host Connection ↔ Viewer Connection│     ║
+        ║   └─────────────────────────────────────┘     ║
+        ║                     │                         ║
+        ║                     ▼                         ║
+        ║              Video Relay                    ║
+        ║                     │                         ║
+        ║       Receive → Forward → Discard            ║
+        ║                                               ║
+        ╚═════════════════════╤═════════════════════════╝
+                              │
+                              │ Binary WebSocket
+                              ▼
+                         Chunk Buffer
+                              │
+                              ▼
+                         MediaSource
+                              │
+                              ▼
+                           <video>
+                              │
+                              ▼
+                           PLAYBACK
+The key benefit
+
+This gives you:
+
+Original quality
+
+No re-encoding
+No transcoding
+Original MP4 bytes
+
+Pre-buffering
+
+Download ahead
+      ↓
+Buffer
+      ↓
+Continue playing during short network interruptions
+
+No permanent upload
+
+Host MP4
+   ↓
+Chunk
+   ↓
+Oracle
+   ↓
+Viewer
+
+
+Oracle doesn't have to store the movie.
+
+Centralized architecture
+
+HOST ──► ORACLE ──► VIEWER
+
+instead of:
+
+HOST ◄────────────► VIEWER
+        P2P
+One important tradeoff
+
+The Oracle server now carries 100% of the video traffic.
+
+If the movie is 2 GB and one viewer watches the whole thing:
+
+Host → Server ≈ 2 GB
+Server → Viewer ≈ 2 GB
+
+So the server needs enough bandwidth, unlike your P2P design where the server mainly handles signaling.
+
+For 1 Host + 1 Viewer, this is quite manageable conceptually and is a good architecture if your goal is to have the Oracle server act as the central middleman.
+
+how to implement this. give me step by step for bginner. dont compromise quality
+
+Yes. Let's build this as a v0.2, but keep the implementation beginner-friendly and do not reduce video quality.
+
+There is one important correction before we start:
+
+Do not split an arbitrary MP4 with file.slice() and directly feed those pieces to <video>.
+
+An MP4 is not necessarily divided into independently playable pieces. For browser streaming with Media Source Extensions (MSE), the data needs to be in suitable media segments, typically fragmented MP4 (fMP4). MSE's SourceBuffer.appendBuffer() expects media data/segments that the browser can append and decode.
+
+So our architecture will be:
+
+Local MP4
+    ↓
+Prepare/fragment WITHOUT re-encoding
+    ↓
+Media segments
+    ↓
+WebSocket
+    ↓
+Oracle Server
+    ↓
+WebSocket
+    ↓
+Viewer
+    ↓
+MSE buffer
+    ↓
+<video>
+
+No re-encoding = no quality loss.
+
+Step 1 — Understand what we're building
+
+Your old v0.1 was:
+
+HOST
+MP4
+ ↓
+<video>
+ ↓
+captureStream()
+ ↓
+WebRTC
+ ↓
+VIEWER
+
+We're replacing that with:
+
+HOST
+MP4
+ ↓
+fMP4 segments
+ ↓
+WebSocket
+ ↓
+ORACLE SERVER
+ ↓
+WebSocket
+ ↓
+VIEWER
+ ↓
+MSE
+ ↓
+<video>
+
+The Oracle server is only a relay.
+
+HOST ──────► ORACLE SERVER ──────► VIEWER
+
+It does not permanently store the movie.
+
+Step 2 — Why fMP4?
+
+Think of a normal MP4 as:
+
+┌─────────────────────────────────────────────┐
+│                 movie.mp4                   │
+│                                             │
+│ metadata + video/audio samples + metadata  │
+└─────────────────────────────────────────────┘
+
+We want:
+
+┌──────────────┐
+│ Initialization│
+│    segment    │
+└──────┬───────┘
+       │
+┌──────▼───────┐
+│   Segment 1  │ → ~2 seconds
+└──────────────┘
+┌──────────────┐
+│   Segment 2  │ → ~2 seconds
+└──────────────┘
+┌──────────────┐
+│   Segment 3  │ → ~2 seconds
+└──────────────┘
+...
+
+The browser can append these segments to an MSE SourceBuffer. MSE is specifically designed for media made from multiple chunks/segments.
+
+Step 3 — No quality loss
+
+This is very important for your requirement.
+
+We are not doing:
+
+1080p H.264
+      ↓
+decode
+      ↓
+encode again
+      ↓
+lower bitrate
+
+Instead:
+
+Original MP4
+      ↓
+fragment/remux
+      ↓
+same encoded video
+      ↓
+send bytes
+
+Fragmenting an MP4 is a container/media-organization operation; it does not inherently require re-encoding. GPAC's documentation describes MP4 fragmentation using movie fragments and distinguishes it from transcoding.
+
+So:
+
+Resolution       SAME
+FPS              SAME
+Video codec      SAME
+Bitrate          SAME
+Audio            SAME
+Visual quality   SAME
+Step 4 — First make a test fragmented MP4
+
+Before writing the WebSocket code, let's prove that your browser can play fragmented MP4 through MSE.
+
+Install GPAC/MP4Box on your development machine.
+
+Then take:
+
+movie.mp4
+
+and create a fragmented version.
+
+For example:
+
+MP4Box -frag 2000 movie.mp4 -out movie_fragmented.mp4
+
+Here:
+
+2000 ms = 2 seconds
+
+GPAC documents -frag as creating MP4 movie fragments and gives examples such as -frag 10000 for 10-second fragments.
+
+This does not mean we're going to send this whole file at once. We're using this first just to understand/test the media format.
+
+Step 5 — Understand the Viewer
+
+The Viewer will use:
+
+const mediaSource = new MediaSource();
+
+Then:
+
+video.src = URL.createObjectURL(mediaSource);
+
+When the MediaSource opens:
+
+mediaSource.addEventListener("sourceopen", () => {
+
+
+    // create SourceBuffer
+
+
+});
+
+Then:
+
+const sourceBuffer =
+    mediaSource.addSourceBuffer(
+        'video/mp4; codecs="..."'
+    );
+
+addSourceBuffer() creates the buffer that accepts media segments. The MIME/codec string must be supported by the browser.
+
+Step 6 — Test MSE locally before networking
+
+This is important.
+
+Don't immediately introduce:
+
+Host → WebSocket → Oracle → Viewer
+
+First prove:
+
+Segment 1
+   ↓
+MSE
+   ↓
+<video>
+
+
+Segment 2
+   ↓
+MSE
+   ↓
+<video>
+
+A simplified example looks like:
+
+const video = document.getElementById("video");
+
+
+const mediaSource = new MediaSource();
+
+
+video.src = URL.createObjectURL(mediaSource);
+
+
+mediaSource.addEventListener("sourceopen", () => {
+
+
+    const sourceBuffer =
+        mediaSource.addSourceBuffer(
+            'video/mp4; codecs="avc1.640028, mp4a.40.2"'
+        );
+
+
+});
+
+Don't copy that codec string blindly.
+
+Your MP4 might use a different H.264 profile or audio codec. MSE requires a compatible MIME/codec combination.
+
+We'll determine yours from your actual file.
+
+Step 7 — Now introduce the Oracle server
+
+Your Spring Boot application currently has:
+
+SignalingHandler
+
+For this architecture, we don't need WebRTC signaling anymore.
+
+Instead, your server has two WebSocket connections:
+
+HOST
+  │
+  │ WebSocket
+  ▼
+Spring Boot
+  │
+  │ WebSocket
+  ▼
+VIEWER
+
+Your server maintains:
+
+private WebSocketSession host;
+private WebSocketSession viewer;
+
+For your 1 Host + 1 Viewer v0.2, that's enough.
+
+Step 8 — Host sends a media segment
+
+Instead of:
+
+peerConnection.addTrack(...)
+
+we'll eventually do:
+
+socket.send(segment);
+
+where:
+
+segment = binary media data
+
+WebSockets support binary messages such as ArrayBuffer, Blob, typed arrays, etc.
+
+On the Host:
+
+socket.send(arrayBuffer);
+Step 9 — Tell the server whether it's a chunk
+
+We still need control messages.
+
+So your WebSocket will carry two types of messages:
+
+Text
+{
+    "type": "HOST"
+}
+{
+    "type": "VIEWER"
+}
+{
+    "type": "PLAY"
+}
+{
+    "type": "STOP"
+}
+Binary
+[media segment bytes]
+
+The server distinguishes them:
+
+Text
+ ↓
+JSON/control message
+
+
+Binary
+ ↓
+Video segment
+Step 10 — Server forwards binary data
+
+Conceptually:
+
+if (message instanceof BinaryMessage) {
+
+
+    if (viewer != null) {
+
+
+        viewer.sendMessage(
+            new BinaryMessage(
+                message.getPayload()
+            )
+        );
+
+
+    }
+}
+
+So:
+
+HOST
+
+
+Binary Segment 1
+      │
+      ▼
+Spring Boot
+      │
+      ▼
+VIEWER
+
+
+Binary Segment 1
+
+Then:
+
+HOST
+
+
+Binary Segment 2
+      │
+      ▼
+Spring Boot
+      │
+      ▼
+VIEWER
+
+
+Binary Segment 2
+
+The server doesn't decode the video.
+
+It simply relays bytes.
+
+Step 11 — Viewer receives binary data
+
+On the Viewer:
+
+socket.binaryType = "arraybuffer";
+
+This makes binary WebSocket messages arrive as ArrayBuffer.
+
+Then:
+
+socket.onmessage = event => {
+
+
+    if (event.data instanceof ArrayBuffer) {
+
+
+        // video segment
+        addSegment(event.data);
+
+
+    }
+
+
+};
+Step 12 — Append segment to MSE
+
+We'll maintain:
+
+const segmentQueue = [];
+let appending = false;
+
+When a segment arrives:
+
+function addSegment(segment) {
+
+
+    segmentQueue.push(segment);
+
+
+    appendNextSegment();
+
+
+}
+
+Then:
+
+function appendNextSegment() {
+
+
+    if (sourceBuffer.updating) {
+        return;
+    }
+
+
+    if (segmentQueue.length === 0) {
+        return;
+    }
+
+
+    const segment = segmentQueue.shift();
+
+
+    sourceBuffer.appendBuffer(segment);
+
+
+}
+
+When the browser finishes appending:
+
+sourceBuffer.addEventListener(
+    "updateend",
+    () => {
+
+
+        appendNextSegment();
+
+
+    }
+);
+
+appendBuffer() is asynchronous, so you need to wait until the buffer finishes updating before appending the next segment.
+
+Step 13 — This creates your buffer
+
+Now imagine the Host is sending:
+
+Segment 1
+Segment 2
+Segment 3
+Segment 4
+Segment 5
+
+The Viewer might have:
+
+Current playback
+      ↓
+┌─────────────────────────────────────┐
+│ S1 │ S2 │ S3 │ S4 │ S5 │ S6 │ S7 │
+└─────────────────────────────────────┘
+  ▲                         ▲
+  │                         │
+Playing                  Downloaded
+
+So:
+
+Current = 10 seconds
+Buffered = 30 seconds
+
+If the network pauses briefly:
+
+Network interruption
+        ↓
+Viewer still has buffered data
+        ↓
+Playback continues
+
+That's the behavior you're trying to achieve.
+
+Step 14 — Don't send the whole file immediately
+
+This is important.
+
+Don't do:
+
+file.arrayBuffer()
+
+and send the entire movie.
+
+That would defeat the purpose.
+
+Instead:
+
+Host
+ │
+ ├── Segment 1 → send
+ ├── Segment 2 → send
+ ├── Segment 3 → send
+ ├── Segment 4 → send
+ │
+ │    wait / monitor buffer
+ │
+ ├── Segment 5
+ └── Segment 6
+
+We want controlled pre-buffering.
+
+For example:
+
+Target buffer = 20 seconds
+
+When Viewer has:
+
+20 seconds buffered
+
+Host can slow/stop sending temporarily.
+
+When it falls to:
+
+5 seconds
+
+Host sends more.
+
+That's how you prevent unnecessary memory/bandwidth usage.
+
+Step 15 — PLAY / PAUSE
+
+The Host remains the source of truth.
+
+Host:
+
+send({
+    type: "PLAY"
+});
+
+Server:
+
+HOST
+ ↓
+PLAY
+ ↓
+SERVER
+ ↓
+VIEWER
+
+Viewer:
+
+if (data.type === "PLAY") {
+
+
+    video.play();
+
+
+}
+
+For pause:
+
+if (data.type === "PAUSE") {
+
+
+    video.pause();
+
+
+}
+Step 16 — Seeking
+
+This architecture actually gives you a much better path toward seeking.
+
+Suppose:
+
+Host → 30:00
+
+Host sends:
+
+{
+    "type": "SEEK",
+    "position": 1800
+}
+
+The server forwards:
+
+SEEK 1800
+
+Then the Host can send the required media segment starting around that point.
+
+However, don't implement seeking first.
+
+Get:
+
+PLAY
+PAUSE
+BUFFER
+
+working first.
+
+Step 17 — Your development order
+
+Don't try to write everything at once.
+
+Build it in this order:
+
+Phase 1 — Media
+MP4
+ ↓
+fMP4
+ ↓
+MSE
+ ↓
+<video>
+
+Make sure the browser can play your fragmented media.
+
+Phase 2 — WebSocket
+Host
+ ↓
+WebSocket
+ ↓
+Viewer
+
+Send a simple binary test:
+
+Hello binary data
+Phase 3 — Combine them
+Host
+ ↓
+fMP4 segment
+ ↓
+WebSocket
+ ↓
+Viewer
+ ↓
+MSE
+ ↓
+Video
+Phase 4 — Buffer
+Host
+ ↓
+Segment 1
+Segment 2
+Segment 3
+Segment 4
+       ↓
+Viewer buffer
+       ↓
+Playback
+Phase 5 — Controls
+PLAY
+PAUSE
+Phase 6 — Seeking
+SEEK 120
+Phase 7 — Optimization
+Buffer target
+Memory management
+Backpressure
+Reconnection
+One thing I want you to change from the earlier idea
+
+Earlier we talked about:
+
+file.slice()
+ ↓
+1 MB arbitrary chunks
+ ↓
+MSE
+
+Don't implement it that way.
+
+An arbitrary byte slice is not necessarily a playable media segment.
+
+For example:
+
+MP4 bytes
+
+
+[metadata][video data][audio data][video data]...
+          ↑
+          arbitrary 1 MB boundary
+
+Cutting in the middle of a media structure doesn't make a valid MSE segment.
+
+MSE expects appropriately structured media segments, and browser support depends on the container/codec.
+
+That's why we're introducing fragmented MP4.
+
+Final architecture we're going to implement
+                         ORACLE SERVER
+                     ┌────────────────────┐
+                     │     Spring Boot    │
+                     │                    │
+                     │  Host WebSocket    │
+                     │        │           │
+                     │        ▼           │
+                     │   Binary Relay     │
+                     │        │           │
+                     │        ▼           │
+                     │ Viewer WebSocket   │
+                     └────────┬───────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+              ▼                               ▼
+
+
+           HOST                            VIEWER
+       ┌───────────┐                    ┌───────────┐
+       │ Local MP4 │                    │ WebSocket │
+       └─────┬─────┘                    └─────┬─────┘
+             │                                │
+             ▼                                ▼
+      fMP4 segments                     Segment Queue
+             │                                │
+             │                                ▼
+             │                          MediaSource
+             │                                │
+             │                                ▼
+             │                         SourceBuffer
+             │                                │
+             │                                ▼
+             │                             <video>
+             │                                │
+             └──────── WebSocket ─────────────┘
+                       via server
+Quality
+Original MP4
+     │
+     │ NO TRANSCODING
+     ▼
+Fragmented MP4
+     │
+     │ NO TRANSCODING
+     ▼
+WebSocket
+     │
+     ▼
+MSE
+     │
+     ▼
+Viewer
+
+No resolution reduction. No bitrate reduction. No re-encoding.
+
+The only thing we're changing is how the existing encoded media is packaged and delivered.
+
+What I recommend we do next
+
+Since you're a beginner and already have your Spring Boot SignalingHandler + HTML + app.js, don't try to implement all of this at once.
+
+Next step should be Phase 1 only: prepare your existing MP4 as fMP4 and make the Viewer play it through MediaSource/SourceBuffer.
+
+Once that works, we'll modify your existing SignalingHandler to relay the binary segments. That keeps each step small and easy to debug.
+
+Okay guide me through phase 1
+
+Yes. We'll do Phase 1 only and keep it beginner-friendly.
+
+The goal of Phase 1 is:
+
+Take your local MP4 → make it fragmented MP4 without re-encoding → play it in the browser using MSE.
+
+No Spring Boot, no WebSocket, no Oracle server yet.
+
+Phase 1 — MP4 → fMP4 → MSE → <video>
+
+Our test architecture will be:
+
+movie.mp4
+   │
+   │ MP4Box
+   ▼
+fragmented.mp4
+   │
+   │ Browser
+   ▼
+MediaSource
+   │
+   ▼
+SourceBuffer
+   │
+   ▼
+<video>
+
+Fragmentation doesn't inherently re-encode the media; it restructures the MP4 into movie fragments suitable for streaming.
+
+Step 1 — Keep your existing project
+
+You don't need to create a new Spring Boot project.
+
+You already have something like:
+
+Watch_Party/
+│
+├── src/
+│   └── main/
+│       └── resources/
+│           └── static/
+│               ├── index.html
+│               └── app.js
+│
+└── pom.xml
+
+For Phase 1, we'll temporarily ignore your WebSocket code.
+
+Step 2 — Install MP4Box
+
+We're going to use GPAC/MP4Box to fragment your MP4.
+
+Download/install GPAC from the official project. The relevant tool is MP4Box. GPAC documents -frag specifically for creating MP4 movie fragments.
+
+After installing, open Command Prompt and test:
+
+MP4Box -version
+
+You should see something similar to:
+
+MP4Box - GPAC version ...
+
+If Windows says:
+
+'MP4Box' is not recognized...
+
+then MP4Box isn't in your PATH. You can either add its installation folder to PATH or run the executable using its full path.
+
+Step 3 — Put your test video somewhere simple
+
+For example:
+
+C:\WatchPartyTest\
+
+Put your MP4 there:
+
+C:\WatchPartyTest\
+    movie.mp4
+
+Let's say your video is:
+
+13534292_1920_1080_25fps.mp4
+
+Then:
+
+C:\WatchPartyTest\
+    13534292_1920_1080_25fps.mp4
+Step 4 — Get information about your video
+
+Run:
+
+MP4Box -info "C:\WatchPartyTest\13534292_1920_1080_25fps.mp4"
+
+You'll get information about the tracks/codecs.
+
+We particularly care about:
+
+Video
+Audio
+
+For example, you might see something indicating:
+
+Video: AVC/H.264
+Audio: AAC
+
+Don't assume the codec string yet.
+
+MSE requires a MIME type that accurately describes the media codecs, and the browser can reject unsupported combinations.
+
+If you paste the output of MP4Box -info here, I can tell you the exact codec string to use.
+
+Step 5 — Create the fragmented MP4
+
+Run:
+
+MP4Box -frag 2000 "C:\WatchPartyTest\13534292_1920_1080_25fps.mp4" -out "C:\WatchPartyTest\fragmented.mp4"
+
+The important part is:
+
+-frag 2000
+
+which creates approximately 2-second movie fragments. GPAC documents -frag as the fragmentation operation and gives examples such as -frag 10000 for 10-second fragments.
+
+Now you should have:
+
+C:\WatchPartyTest\
+│
+├── 13534292_1920_1080_25fps.mp4
+│
+└── fragmented.mp4
+Important
+
+We did not convert:
+
+1080p → 720p
+
+or:
+
+25 FPS → 15 FPS
+
+or:
+
+10 Mbps → 2 Mbps
+
+We're only fragmenting the MP4 container.
+
+So the encoded video quality remains unchanged.
+
+Step 6 — Put fragmented.mp4 in your Spring Boot static folder
+
+For now, we'll let Spring Boot serve it.
+
+Put it here:
+
+src/main/resources/static/fragmented.mp4
+
+So your project becomes:
+
+src/
+└── main/
+    └── resources/
+        └── static/
+            ├── index.html
+            ├── app.js
+            └── fragmented.mp4
+Step 7 — Temporarily simplify your HTML
+
+For Phase 1, we only need a video element.
+
+Your index.html can temporarily be:
+
+<!DOCTYPE html>
+<html>
+
+
+<head>
+
+
+    <meta charset="UTF-8">
+
+
+    <title>SyncWatch - Phase 1</title>
+
+
+</head>
+
+
+<body>
+
+
+    <h1>SyncWatch Phase 1</h1>
+
+
+    <video
+        id="video"
+        controls
+        width="800">
+    </video>
+
+
+    <p id="status">Loading...</p>
+
+
+    <script src="app.js"></script>
+
+
+</body>
+
+
+</html>
+Step 8 — Replace app.js temporarily
+
+For Phase 1, don't use your WebSocket/WebRTC code.
+
+Replace app.js with:
+
+const video = document.getElementById("video");
+const status = document.getElementById("status");
+
+
+const videoUrl = "/fragmented.mp4";
+
+
+const mimeCodec =
+    'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+
+
+
+
+if (!MediaSource.isTypeSupported(mimeCodec)) {
+
+
+    status.innerText =
+        "Browser does not support this video codec.";
+
+
+    console.error(
+        "Unsupported codec:",
+        mimeCodec
+    );
+
+
+} else {
+
+
+    const mediaSource = new MediaSource();
+
+
+    video.src = URL.createObjectURL(
+        mediaSource
+    );
+
+
+
+
+    mediaSource.addEventListener(
+        "sourceopen",
+        () => {
+
+
+            console.log("MediaSource opened");
+
+
+            const sourceBuffer =
+                mediaSource.addSourceBuffer(
+                    mimeCodec
+                );
+
+
+
+
+            fetch(videoUrl)
+
+
+                .then(response => {
+
+
+                    return response.arrayBuffer();
+
+
+                })
+
+
+                .then(data => {
+
+
+                    console.log(
+                        "Video data received"
+                    );
+
+
+                    sourceBuffer.appendBuffer(
+                        data
+                    );
+
+
+                });
+
+
+
+
+            sourceBuffer.addEventListener(
+                "updateend",
+                () => {
+
+
+                    console.log(
+                        "Video appended successfully"
+                    );
+
+
+                    mediaSource.endOfStream();
+
+
+                    status.innerText =
+                        "Video ready";
+
+
+                }
+            );
+
+
+        }
+    );
+
+
+}
+
+This follows the basic MSE pattern: create a MediaSource, attach it to the <video>, create a SourceBuffer, then append media data with appendBuffer().
+
+Step 9 — Important: the codec string may be wrong
+
+This:
+
+'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
+
+is just an example.
+
+Don't assume your MP4 uses those exact codec parameters.
+
+MSE requires the MIME type and codec information to match the media.
+
+So if you run:
+
+MP4Box -info "C:\WatchPartyTest\13534292_1920_1080_25fps.mp4"
+
+and paste the output here, I can give you the correct value.
+
+Step 10 — Start Spring Boot
+
+Run your normal Spring Boot application.
+
+For example:
+
+Spring Boot
+    ↓
+http://localhost:8080
+
+Open:
+
+http://localhost:8080
+
+You should see:
+
+SyncWatch Phase 1
+
+
+[ video player ]
+
+
+Video ready
+Step 11 — What should happen?
+
+The browser does:
+
+GET /fragmented.mp4
+       ↓
+Spring Boot
+       ↓
+fragmented.mp4
+       ↓
+ArrayBuffer
+       ↓
+SourceBuffer
+       ↓
+MediaSource
+       ↓
+<video>
+
+The browser then plays the fragmented MP4.
+
+But there's one problem with this first test
+
+This Phase 1 test downloads the entire fragmented MP4:
+
+fetch(videoUrl)
+    .then(response => response.arrayBuffer())
+
+So it does not yet give us pre-buffering.
+
+We're deliberately doing this first because we need to verify:
+
+Can this exact video be played through MSE?
+
+Once that works, we move to:
+
+Phase 1A
+
+
+fragmented.mp4
+       ↓
+separate media segments
+       ↓
+Segment 1
+Segment 2
+Segment 3
+...
+       ↓
+MSE
+
+Then:
+
+Phase 2
+
+
+HOST
+ │
+ │ WebSocket
+ ▼
+ORACLE
+ │
+ │ WebSocket
+ ▼
+VIEWER
+
+Then finally:
+
+Phase 3
+
+
+HOST
+ │
+ │ Segment 1
+ │ Segment 2
+ │ Segment 3
+ ▼
+ORACLE
+ │
+ │ Segment 1
+ │ Segment 2
+ │ Segment 3
+ ▼
+VIEWER
+ │
+ ▼
+MSE BUFFER
+ │
+ ▼
+<video>
+So don't move to Phase 2 yet
+
+Do these three things first:
+
+① Run
+MP4Box -info "C:\WatchPartyTest\YOUR_VIDEO.mp4"
+② Create
+MP4Box -frag 2000 "C:\WatchPartyTest\YOUR_VIDEO.mp4" -out "C:\WatchPartyTest\fragmented.mp4"
+③ Send me the output of:
+MP4Box -info "C:\WatchPartyTest\YOUR_VIDEO.mp4"
+
+Then I'll give you the exact mimeCodec value and the next Phase 1 code for your particular MP4, rather than guessing the codec.

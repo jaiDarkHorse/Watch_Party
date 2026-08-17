@@ -1,427 +1,301 @@
 const video = document.getElementById("video");
-const videoFile = document.getElementById("videoFile");
-
-const hostButton = document.getElementById("hostButton");
-const viewerButton = document.getElementById("viewerButton");
-
-const startButton = document.getElementById("startButton");
-const stopButton = document.getElementById("stopButton");
-
 const status = document.getElementById("status");
 
+const mediaSource = new MediaSource();
 
-let role = null;
-let socket = null;
-let peerConnection = null;
-let localStream = null;
-let viewerReady = false;
+video.src = URL.createObjectURL(mediaSource);
 
 
-// Connect to Spring Boot WebSocket
+const videoMime =
+    'video/mp4; codecs="avc1.4D401E"';
 
-socket = new WebSocket(
-    "ws://" + window.location.host + "/ws"
+const audioMime =
+    'audio/mp4; codecs="mp4a.40.2"';
+
+
+console.log(
+    "Video supported:",
+    MediaSource.isTypeSupported(videoMime)
+);
+
+console.log(
+    "Audio supported:",
+    MediaSource.isTypeSupported(audioMime)
 );
 
 
-socket.onopen = () => {
+mediaSource.addEventListener("sourceopen", async () => {
 
-    status.innerText = "Connected to Spring Boot";
+    console.log("MediaSource opened");
 
-    console.log("Connected to WebSocket");
+    if (!MediaSource.isTypeSupported(videoMime)) {
+        console.error("Video codec not supported");
+        return;
+    }
 
-};
-
-
-// Host button
-
-hostButton.onclick = () => {
-
-    role = "HOST";
-
-    video.controls = true;
-
-    socket.send(
-        JSON.stringify({
-            type: "HOST"
-        })
-    );
-
-    status.innerText = "You are the Host";
-
-};
-
-
-// Viewer button
-
-viewerButton.onclick = () => {
-
-    role = "VIEWER";
-
-    video.controls = false;
-
-    socket.send(
-        JSON.stringify({
-            type: "VIEWER"
-        })
-    );
-
-    status.innerText = "You are the Viewer";
-
-    send({
-        type: "VIEWER_READY"
-    });
-
-};
-
-
-// Host selects video
-
-videoFile.onchange = () => {
-
-    if (role !== "HOST") {
-
-        alert("Only the host can select a video");
-
+    if (!MediaSource.isTypeSupported(audioMime)) {
+        console.error("Audio codec not supported");
         return;
     }
 
 
-    const file = videoFile.files[0];
+    const videoBuffer =
+        mediaSource.addSourceBuffer(videoMime);
 
-    if (!file) {
-        return;
-    }
-
-
-    const url = URL.createObjectURL(file);
-
-    video.src = url;
-
-    video.load();
-
-    console.log("Video selected:", file.name);
-
-};
+    const audioBuffer =
+        mediaSource.addSourceBuffer(audioMime);
 
 
-// Video loaded
-
-video.onloadedmetadata = async () => {
-
-    if (role !== "HOST") {
-        return;
-    }
+    console.log("SourceBuffers created");
 
 
-    localStream = video.captureStream();
+    try {
 
-    console.log("Video stream captured");
+        /*
+         * 1. Append video initialization segment
+         */
+        console.log("Loading video initialization...");
 
+        const videoInit =
+            await fetch(
+                "/segments/init-stream0.m4s"
+            ).then(response => {
 
-    if (viewerReady) {
+                if (!response.ok) {
+                    throw new Error(
+                        "Failed to load video initialization"
+                    );
+                }
 
-        await createOffer();
-
-    }
-
-};
-
-
-// Create WebRTC connection
-
-function createPeerConnection() {
-
-    peerConnection = new RTCPeerConnection({
-
-        iceServers: [
-            {
-                urls: "stun:stun.l.google.com:19302"
-            }
-        ]
-
-    });
-
-
-    peerConnection.onicecandidate = event => {
-
-        if (event.candidate) {
-
-            send({
-                type: "ICE",
-                candidate: event.candidate
+                return response.arrayBuffer();
             });
 
-        }
 
-    };
-
-}
-
-
-// Host creates offer
-
-async function createOffer() {
-
-    createPeerConnection();
-
-
-    localStream.getTracks().forEach(track => {
-
-        peerConnection.addTrack(
-            track,
-            localStream
+        await appendBuffer(
+            videoBuffer,
+            videoInit
         );
 
-    });
+        console.log(
+            "Video initialization appended"
+        );
 
 
-    const offer = await peerConnection.createOffer();
+        /*
+         * 2. Append audio initialization segment
+         */
+        console.log("Loading audio initialization...");
 
-    await peerConnection.setLocalDescription(offer);
+        const audioInit =
+            await fetch(
+                "/segments/init-stream1.m4s"
+            ).then(response => {
 
+                if (!response.ok) {
+                    throw new Error(
+                        "Failed to load audio initialization"
+                    );
+                }
 
-    send({
-        type: "OFFER",
-        offer: offer
-    });
-
-    console.log("Offer sent");
-
-}
-
-
-// Setup viewer
-
-function setupViewer() {
-
-    createPeerConnection();
+                return response.arrayBuffer();
+            });
 
 
-    peerConnection.ontrack = event => {
+        await appendBuffer(
+            audioBuffer,
+            audioInit
+        );
 
-        console.log("Video received");
+        console.log(
+            "Audio initialization appended"
+        );
 
-        video.srcObject = event.streams[0];
 
-        video.play().catch(error => {
+        /*
+         * 3. Video segments
+         */
+
+        for (let i = 1; i <= 9; i++) {
+
+            const filename =
+                String(i).padStart(5, "0");
 
             console.log(
-                "Viewer play error:",
-                error
+                `Loading video segment ${i}`
             );
 
-        });
 
-    };
+            const data =
+                await fetch(
+                    `/segments/chunk-stream0-${filename}.m4s`
+                ).then(response => {
 
-}
+                    if (!response.ok) {
+                        throw new Error(
+                            `Failed to load video segment ${i}`
+                        );
+                    }
 
-
-// WebSocket message handling
-
-socket.onmessage = async event => {
-
-    const data = JSON.parse(event.data);
-
-    console.log("Received:", data);
-
-
-    // Viewer is ready
-
-    if (data.type === "VIEWER_READY") {
-
-        if (role === "HOST") {
-
-            viewerReady = true;
+                    return response.arrayBuffer();
+                });
 
 
-            if (localStream) {
+            await appendBuffer(
+                videoBuffer,
+                data
+            );
 
-                await createOffer();
+
+            console.log(
+                `Video segment ${i} appended`
+            );
+        }
+
+
+        /*
+         * 4. Audio segments
+         */
+
+        for (let i = 1; i <= 32; i++) {
+
+            const filename =
+                String(i).padStart(5, "0");
+
+            console.log(
+                `Loading audio segment ${i}`
+            );
+
+
+            const data =
+                await fetch(
+                    `/segments/chunk-stream1-${filename}.m4s`
+                ).then(response => {
+
+                    if (!response.ok) {
+                        throw new Error(
+                            `Failed to load audio segment ${i}`
+                        );
+                    }
+
+                    return response.arrayBuffer();
+                });
+
+
+            await appendBuffer(
+                audioBuffer,
+                data
+            );
+
+
+            console.log(
+                `Audio segment ${i} appended`
+            );
+        }
+
+
+        console.log(
+            "All segments appended"
+        );
+
+        status.innerText =
+            "All segments loaded";
+
+
+        /*
+         * We are finished.
+         */
+        if (mediaSource.readyState === "open") {
+
+            mediaSource.endOfStream();
+
+        }
+
+    } catch (error) {
+
+        console.error(
+            "SEGMENT PLAYBACK ERROR:",
+            error
+        );
+
+        status.innerText =
+            "Segment playback error";
+
+    }
+
+});
+
+
+/*
+ * Helper function
+ *
+ * SourceBuffer.appendBuffer() is asynchronous.
+ *
+ * Therefore we must wait for
+ * "updateend" before appending
+ * another buffer.
+ */
+
+function appendBuffer(
+    sourceBuffer,
+    data
+) {
+
+    return new Promise(
+        (resolve, reject) => {
+
+            const onUpdateEnd = () => {
+
+                cleanup();
+
+                resolve();
+
+            };
+
+
+            const onError = (event) => {
+
+                cleanup();
+
+                reject(
+                    new Error(
+                        "SourceBuffer append failed"
+                    )
+                );
+
+            };
+
+
+            function cleanup() {
+
+                sourceBuffer.removeEventListener(
+                    "updateend",
+                    onUpdateEnd
+                );
+
+                sourceBuffer.removeEventListener(
+                    "error",
+                    onError
+                );
 
             }
 
-        }
 
-        return;
-    }
-
-
-    // Receive offer
-
-    if (data.type === "OFFER") {
-
-        if (role !== "VIEWER") {
-            return;
-        }
-
-
-        setupViewer();
-
-
-        await peerConnection.setRemoteDescription(
-            data.offer
-        );
-
-
-        const answer =
-            await peerConnection.createAnswer();
-
-
-        await peerConnection.setLocalDescription(
-            answer
-        );
-
-
-        send({
-            type: "ANSWER",
-            answer: answer
-        });
-
-        console.log("Answer sent");
-
-        return;
-    }
-
-
-    // Receive answer
-
-    if (data.type === "ANSWER") {
-
-        if (role !== "HOST") {
-            return;
-        }
-
-
-        await peerConnection.setRemoteDescription(
-            data.answer
-        );
-
-        console.log("Answer received");
-
-        return;
-    }
-
-
-    // Receive ICE candidate
-
-    if (data.type === "ICE") {
-
-        if (peerConnection) {
-
-            try {
-
-                await peerConnection.addIceCandidate(
-                    data.candidate
-                );
-
-            } catch (error) {
-
-                console.error(
-                    "ICE error:",
-                    error
-                );
-
-            }
-
-        }
-
-        return;
-    }
-
-
-    // Play video
-
-    if (data.type === "PLAY") {
-
-        if (role !== "VIEWER") {
-            return;
-        }
-
-
-        video.play().catch(error => {
-
-            console.log(
-                "Viewer play error:",
-                error
+            sourceBuffer.addEventListener(
+                "updateend",
+                onUpdateEnd,
+                { once: true }
             );
 
-        });
 
-        return;
-    }
+            sourceBuffer.addEventListener(
+                "error",
+                onError,
+                { once: true }
+            );
 
 
-    // Stop video
+            sourceBuffer.appendBuffer(data);
 
-    if (data.type === "STOP") {
-
-        if (role !== "VIEWER") {
-            return;
         }
-
-
-        video.pause();
-
-        return;
-    }
-
-};
-
-
-// Send message to Spring Boot
-
-function send(data) {
-
-    socket.send(
-        JSON.stringify(data)
     );
-
 }
-
-
-// Host starts video
-
-startButton.onclick = async () => {
-
-    if (role !== "HOST") {
-        return;
-    }
-
-
-    if (!video.src) {
-
-        alert("Please select a video first");
-
-        return;
-    }
-
-
-    await video.play();
-
-
-    send({
-        type: "PLAY"
-    });
-
-};
-
-
-// Host stops video
-
-stopButton.onclick = () => {
-
-    if (role !== "HOST") {
-        return;
-    }
-
-
-    video.pause();
-
-
-    send({
-        type: "STOP"
-    });
-
-};
